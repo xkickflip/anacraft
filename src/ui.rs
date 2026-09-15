@@ -139,6 +139,12 @@ const VIEWS_COLUMN: usize = 8;
 const SHARE_COLUMN: usize = 5;
 /// Width of the "climbed two places" marker on a chunk's heading line.
 const MOVED_COLUMN: usize = 4;
+/// The vitals name column
+const NAME_COLUMN: usize = 14;
+/// The number and two spaces that keep it off the delta
+const VALUE_COLUMN: usize = 12;
+/// The widest delta the row can carry
+const DELTA_COLUMN: usize = 6;
 /// How often the live graph takes a column. Independent of the poll: the graph
 /// scrolls on this clock whether or not a new sample has arrived, which is what
 /// keeps the panel moving the way btop's graphs do.
@@ -1591,6 +1597,11 @@ async fn event_loop(
                         KeyCode::Char('t') => {
                             theme::cycle();
                         }
+                        // Boring mode toggle: Just like the theme cycle key,
+                        // cycle between default craft mode & boring mode text
+                        KeyCode::Char('b') => {
+                            theme::toggle_boring();
+                        }
                         // Tab walks the configured properties. A one-property
                         // rotation has nothing to walk to, so the key is inert
                         // rather than redrawing the same numbers.
@@ -2013,7 +2024,10 @@ fn too_small(area: Rect) -> Paragraph<'static> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "· the shaft is too tight to work in",
+                theme::say(
+                    "· the shaft is too tight to work in",
+                    "· not enough room to draw",
+                ),
                 Style::default().fg(ore::stone()),
             ),
         ]),
@@ -2924,8 +2938,12 @@ fn help_overlay(frame: &mut Frame, area: Rect, demo: bool) {
         ("^5 / 5", "vitals panel"),
         ("^6 / 6", "top countries"),
         ("^7 / 7", "daily users"),
-        ("^8 / 8", "portals — who sent them"),
+        (
+            "^8 / 8",
+            theme::say("portals — who sent them", "traffic sources"),
+        ),
         ("t", "next theme"),
+        ("b", "boring - plain GA4 names"),
         ("tab", "next property"),
         ("? / h", "this list"),
     ];
@@ -3208,14 +3226,31 @@ fn metrics_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
     let gaps = height >= VITALS_ROWS;
     let phase = dash.phase();
 
-    // Each metric is one row of `name (plain)  value  delta`. The plain
-    // subtitle is the first column to give way on a narrow tile: it is the
-    // reassurance, and the number it sits beside is the point. A three-wide
-    // grid tile keeps the name and the number, and the two stacked columns can
-    // keep the subtitle. The bar is sized to the panel rather than its old
-    // fixed thirty, so it never runs under the border of a short tile.
+    // Each metric is one row of `name (field)  value  delta`. The subtitle is
+    // the first column to give way on a narrow tile: it is the reassurance,
+    // and the number it sits beside is the point. A three-wide grid tile keeps
+    // the name and the number, and the two stacked columns can keep the
+    // subtitle. The bar is sized to the panel rather than its old fixed
+    // thirty, so it never runs under the border of a short tile.
+    //
+    // The column is as wide as the widest name it has to carry rather than a
+    // fixed fourteen, because the two vocabularies do not carry the same
+    // names: craft's widest subtitle is `avg. session`, which is the fourteen
+    // this column has always been, and boring mode spells out the GA4 field
+    // instead, whose widest is `averageSessionDuration`. Measuring it here is
+    // what keeps a tile that can afford the fields from being sized against
+    // the craft names — and what moves the point where the column is given up,
+    // since the wider column runs out of room ten cells sooner.
     let inner = width.saturating_sub(2) as usize;
-    let subtitle = inner >= 47;
+    let sub_column = OVERVIEW
+        .iter()
+        .map(|metric| metric.sub().chars().count() + 2)
+        .max()
+        .unwrap_or(NAME_COLUMN);
+    // Shed whole, never cut: a field name truncated to `averageSessionDur…`
+    // is a field that does not exist, and boring mode exists to be read by
+    // somebody who will go and type it into GA4.
+    let subtitle = inner > NAME_COLUMN + sub_column + VALUE_COLUMN + DELTA_COLUMN;
     let bar_cells = inner.saturating_sub(2).min(30);
     let mut lines: Vec<Line> = Vec::new();
 
@@ -3229,12 +3264,12 @@ fn metrics_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
         let label = theme::brighten((metric.color)(), flash * 0.7);
 
         let mut spans = vec![Span::styled(
-            format!("{:<14}", metric.craft),
+            format!("{:<NAME_COLUMN$}", metric.label()),
             Style::default().fg(label).add_modifier(Modifier::BOLD),
         )];
         if subtitle {
             spans.push(Span::styled(
-                format!("{:<14}", format!("({})", metric.plain)),
+                format!("{:<sub_column$}", format!("({})", metric.sub())),
                 Style::default().fg(ore::stone()),
             ));
         }
@@ -3255,7 +3290,7 @@ fn metrics_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
             lines.push(Line::from(bar_spans(
                 row.frac.shown,
                 bar_cells,
-                metric.glyph,
+                metric.bar_glyph(),
                 (metric.color)(),
                 phase,
                 row.frac.moving(),
@@ -3267,7 +3302,7 @@ fn metrics_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
         }
     }
 
-    Paragraph::new(lines).block(framed("VITALS", "5", ore::grass()))
+    Paragraph::new(lines).block(framed(theme::say("VITALS", "OVERVIEW"), "5", ore::grass()))
 }
 
 /// Rank badges: the top three chunks are ore, the rest are plain stone. It is
@@ -3667,7 +3702,10 @@ fn map_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
             // caption telling a narrow tile the map is empty when it is not —
             // which is what a 74-column terminal was reading.
             Some((name, users)) => truncate(&format!("{name} {}", commas(*users)), budget),
-            None => truncate("no realms in this window", budget),
+            None => truncate(
+                theme::say("no realms in this window", "no countries in this window"),
+                budget,
+            ),
         };
     }
 
@@ -3967,7 +4005,10 @@ fn live_panel(dash: &Dash, width: u16) -> Paragraph<'static> {
                     .fg(theme::mix(theme::accent(), theme::bright(), breath))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  players online", Style::default().fg(ore::stone())),
+            Span::styled(
+                theme::say("  players online", "  active users"),
+                Style::default().fg(ore::stone()),
+            ),
         ]),
         Line::from(Span::styled(
             truncate(
@@ -4020,7 +4061,12 @@ fn live_panel(dash: &Dash, width: u16) -> Paragraph<'static> {
 
             let glyph_cell = format!("  {} ", if rising { glyph::UP } else { glyph::DOWN });
             let delta_cell = format!("{:>4} ", format!("{:+}", entry.delta as i64));
-            let label_cell = if rising { "spawned in" } else { "wandered off" }.to_string();
+            let label_cell = if rising {
+                theme::say("spawned in", "arrived")
+            } else {
+                theme::say("wandered off", "left")
+            }
+            .to_string();
             let time_cell = format!("  {}", time_str);
 
             // Unlit cells fill the rest of the row, so the field is visible
@@ -4183,7 +4229,10 @@ fn realms_ranked_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'stati
 
     if sorted.is_empty() {
         lines.push(Line::from(Span::styled(
-            "no realm data in this window",
+            theme::say(
+                "no realm data in this window",
+                "no country data in this window",
+            ),
             Style::default().fg(ore::stone()),
         )));
     }
@@ -4243,7 +4292,10 @@ fn portals_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
 
     if sorted.is_empty() {
         lines.push(Line::from(Span::styled(
-            "nobody has sent anyone this way yet",
+            theme::say(
+                "nobody has sent anyone this way yet",
+                "no referral data in this window",
+            ),
             Style::default().fg(ore::stone()),
         )));
     }
@@ -4297,7 +4349,11 @@ fn portals_panel(dash: &Dash, width: u16, height: u16) -> Paragraph<'static> {
         lines.push(Line::from(spans));
     }
 
-    Paragraph::new(lines).block(framed("PORTALS", "8", ore::emerald()))
+    Paragraph::new(lines).block(framed(
+        theme::say("PORTALS", "TRAFFIC SOURCES"),
+        "8",
+        ore::emerald(),
+    ))
 }
 
 fn footer(dash: &Dash, width: u16) -> Paragraph<'static> {
@@ -4351,12 +4407,17 @@ fn footer(dash: &Dash, width: u16) -> Paragraph<'static> {
     // The bar is built a slot at a time so a narrow terminal can take slots
     // off the end instead of letting the border cut one in half — the last
     // one used to arrive as "· updated" with the clock behind the wall. What
-    // goes first is the timestamp, then the live lamp, then the palette name:
-    // the keys are the reason the bar is there and they are what it keeps.
+    // goes first is the timestamp, then the live lamp, then the vocabulary and
+    // the palette name: the keys are the reason the bar is there and they are
+    // what it keeps.
     let mut slots: Vec<Vec<Span<'static>>> = vec![vec![Span::raw(" ")]];
 
     // Each key is a hotbar slot: [key]label separated by netherite walls.
-    for (k, label) in [("q", "quit"), ("r", "rebuild"), ("?", "help")] {
+    for (k, label) in [
+        ("q", "quit"),
+        ("r", theme::say("rebuild", "refresh")),
+        ("?", "help"),
+    ] {
         let mut group = vec![wall()];
         group.extend(slot(k, label));
         slots.push(group);
@@ -4366,6 +4427,17 @@ fn footer(dash: &Dash, width: u16) -> Paragraph<'static> {
     group.extend(slot("t", ""));
     group.push(Span::styled(
         theme::palette().name.to_string(),
+        Style::default()
+            .fg(theme::accent())
+            .add_modifier(Modifier::BOLD),
+    ));
+    slots.push(group);
+
+    // Vocabulary slot - the mode is the item, the way the pack name is for 't'
+    let mut group = vec![wall()];
+    group.extend(slot("b", ""));
+    group.push(Span::styled(
+        theme::say("craft", "boring").to_string(),
         Style::default()
             .fg(theme::accent())
             .add_modifier(Modifier::BOLD),
@@ -5075,6 +5147,152 @@ mod tests {
         }
     }
 
+    /// Serialises the tests that flip the vocabulary. `BORING` is one global
+    /// for the process and `cargo test` runs threads in parallel, so without
+    /// this a boring render lands in the middle of somebody else's craft one.
+    static VOCAB: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The vocabulary lock, held for a test that means to flip it.
+    ///
+    /// Acquiring normalises to craft and dropping restores it, so a test never
+    /// inherits the mode another one left behind and a failed assertion cannot
+    /// strand the rest of the suite in the wrong one — `Drop` runs on the
+    /// unwind. Both are why the lock has to be taken before the first render
+    /// rather than at the moment of the flip.
+    struct Vocab(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Vocab {
+        fn lock() -> Self {
+            // A test that panicked holding this poisoned it. The data is `()`,
+            // so there is nothing to have corrupted — take it anyway.
+            let guard = VOCAB
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let held = Self(guard);
+            held.craft();
+            held
+        }
+
+        fn boring(&self) {
+            if !theme::boring() {
+                theme::toggle_boring();
+            }
+        }
+
+        fn craft(&self) {
+            if theme::boring() {
+                theme::toggle_boring();
+            }
+        }
+    }
+
+    impl Drop for Vocab {
+        fn drop(&mut self) {
+            self.craft();
+        }
+    }
+
+    /// The vitals as a reader sees them, at the width of a left column on a
+    /// 120-column terminal.
+    fn vitals_text() -> String {
+        rendered(
+            67,
+            VITALS_ROWS,
+            metrics_panel(&capture_dash(), 67, VITALS_ROWS),
+        )
+        .join("\n")
+    }
+
+    #[test]
+    fn the_vitals_say_ga4_when_the_costume_is_off() {
+        // The whole point of the feature: a screenshot somebody can send to a
+        // person who has never heard of a villager.
+        let vocab = Vocab::lock();
+
+        let craft = vitals_text();
+        assert!(craft.contains("VILLAGERS"), "no costume on:\n{craft}");
+
+        vocab.boring();
+        let plain = vitals_text();
+
+        assert!(plain.contains("USERS"), "no plain name:\n{plain}");
+        assert!(plain.contains("totalUsers"), "no GA4 field:\n{plain}");
+        assert!(!plain.contains("VILLAGERS"), "costume still on:\n{plain}");
+        // The panel is retitled too, or the screenshot still says VITALS.
+        assert!(plain.contains("OVERVIEW"), "panel not retitled:\n{plain}");
+    }
+
+    #[test]
+    fn the_costume_goes_back_on() {
+        // `b` is meant to be pressed twice: flip, screenshot, flip back. What
+        // comes back has to be what was there before, not a near miss — which
+        // is also what pins the column arithmetic to where `main` had it.
+        let vocab = Vocab::lock();
+
+        let before = vitals_text();
+        vocab.boring();
+        assert_ne!(before, vitals_text(), "the toggle did nothing");
+
+        vocab.craft();
+        assert_eq!(before, vitals_text(), "the costume came back different");
+    }
+
+    #[test]
+    fn boring_mode_leaves_no_minecraft_word_on_screen() {
+        // The test that keeps this honest as panels are added: a new craft
+        // string that forgets its plain twin fails here rather than in a
+        // screenshot somebody already sent their boss.
+        //
+        // `ANACRAFT` and the pickaxe beside it are deliberately absent from
+        // this list. That is the product's name, not a costume, so it is worn
+        // in both vocabularies.
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let vocab = Vocab::lock();
+        vocab.boring();
+
+        let dash = capture_dash();
+        // Swept at several sizes rather than one, because the board tiles to
+        // fit: each width deals a different set of panels into a different
+        // shape, and a panel that is only drawn on a phone can only be caught
+        // on a phone. The first is a wide desktop, the middle two are the
+        // plates the site publishes, and the last is the narrowest board that
+        // draws a dashboard at all rather than the notice.
+        for (width, height) in [(140, 48), CAPTURES[0], CAPTURES[1], (MIN_COLS, MIN_ROWS)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &dash)).unwrap();
+
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            for word in [
+                "VILLAGERS",
+                "EXPEDITIONS",
+                "BLOCKS MINED",
+                "DIAMONDS",
+                "CREEPER",
+                "SURVIVED",
+                "PORTALS",
+                "realm",
+                "spawned",
+                "wandered",
+                "shaft",
+            ] {
+                assert!(
+                    !screen.contains(word),
+                    "boring mode still says {word:?} at {width}x{height}:\n{screen}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_vitals_give_up_their_gaps_before_their_bars() {
         use ratatui::buffer::Buffer;
@@ -5087,7 +5305,7 @@ mod tests {
         let inked = |height: u16| -> usize {
             let area = Rect::new(0, 0, 90, height);
             let mut buf = Buffer::empty(area);
-            metrics_panel(&capture_dash(), 90, height).render(area, &mut buf);
+            metrics_panel(&capture_dash(), area.width, height).render(area, &mut buf);
             (1..height - 1)
                 .filter(|&y| (1..area.width - 1).any(|x| !buf[(x, y)].symbol().trim().is_empty()))
                 .count()
@@ -5242,6 +5460,10 @@ mod tests {
         // on here, so the board takes a third row rather than turning two of
         // them away.
         use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        // Pinned to craft: this test finds its tiles by their headers, and
+        // `VITALS` and `PORTALS` are two of the names the vocabulary swaps.
+        // Without the lock it reads whichever mode a concurrent test set.
+        let _vocab = Vocab::lock();
 
         let dash = capture_dash();
         let mut terminal = Terminal::new(TestBackend::new(132, 38)).unwrap();
@@ -5296,6 +5518,10 @@ mod tests {
         // a third row — six tiles again, filled in key order: the vitals sit
         // third from the left on the bottom row, not by the chart.
         use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        // Pinned to craft: this test finds its tiles by their headers, and
+        // `VITALS` and `PORTALS` are two of the names the vocabulary swaps.
+        // Without the lock it reads whichever mode a concurrent test set.
+        let _vocab = Vocab::lock();
 
         let dash = capture_dash();
         let mut terminal = Terminal::new(TestBackend::new(100, 75)).unwrap();
@@ -5376,6 +5602,10 @@ mod tests {
         // chart and the portals is exactly the board it promised — the six
         // up front keep everything the queue let through.
         use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        // Pinned to craft: this test finds its tiles by their headers, and
+        // `VITALS` and `PORTALS` are two of the names the vocabulary swaps.
+        // Without the lock it reads whichever mode a concurrent test set.
+        let _vocab = Vocab::lock();
 
         let dash = capture_dash();
         let mut terminal = Terminal::new(TestBackend::new(132, 25)).unwrap();
@@ -5687,6 +5917,10 @@ mod tests {
         // middle as 1, 3, 8 and move the panel after it, which is not what
         // bringing a window back does.
         use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        // Pinned to craft: this test finds its tiles by their headers, and
+        // `VITALS` and `PORTALS` are two of the names the vocabulary swaps.
+        // Without the lock it reads whichever mode a concurrent test set.
+        let _vocab = Vocab::lock();
 
         let (w, h) = (132u16, 40u16);
         let board = |dash: &Dash| -> Vec<String> {
@@ -5751,6 +5985,10 @@ mod tests {
         // tiling manager, and nothing already on the board is turned away to
         // pay for it.
         use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        // Pinned to craft: this test finds its tiles by their headers, and
+        // `VITALS` and `PORTALS` are two of the names the vocabulary swaps.
+        // Without the lock it reads whichever mode a concurrent test set.
+        let _vocab = Vocab::lock();
 
         let (w, h) = (132u16, 40u16);
         let drawn = |dash: &Dash| -> Vec<String> {
@@ -5811,6 +6049,10 @@ mod tests {
         // pulls 8 up into the row — and what is left is still a full board,
         // with no strip of bare ground where the panel used to be.
         use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        // Pinned to craft: this test finds its tiles by their headers, and
+        // `VITALS` and `PORTALS` are two of the names the vocabulary swaps.
+        // Without the lock it reads whichever mode a concurrent test set.
+        let _vocab = Vocab::lock();
 
         let tiled = |dash: &Dash| -> Vec<String> {
             let (w, h) = (132u16, 40u16);
@@ -5979,6 +6221,10 @@ mod tests {
     fn a_site_nobody_links_to_says_so() {
         // The empty state is a sentence, not a blank box: a new site with no
         // referrals looks exactly like a panel that failed to load.
+        //
+        // Pinned to craft: the sentence has a boring twin now, so without the
+        // lock this reads whatever vocabulary a concurrent test left set.
+        let _vocab = Vocab::lock();
         let mut dash = capture_dash();
         dash.portals = Vec::new();
         let text = render_to_string(portals_panel(&dash, 56, PORTALS_ROWS));
